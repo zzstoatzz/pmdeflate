@@ -183,7 +183,7 @@ pub const Inflater = struct {
             decoder.reader.seek = self.window_used;
             decoder.reader.end = self.window_used;
             while (true) {
-                const room = max_len - produced;
+                const room = max_len -| produced;
                 if (room == 0) {
                     // full: one more byte of output means the message is
                     // too large. decode it into a probe, never into `out`.
