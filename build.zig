@@ -45,4 +45,39 @@ pub fn build(b: *std.Build) void {
         });
         targets_step.dependOn(&lib.step);
     }
+
+    // zlib is the reference implementation for differential tests and the
+    // baseline for benchmarks. only those steps fetch and compile it.
+    const differential_step = b.step("differential", "round-trip against zlib in both directions");
+    if (b.lazyDependency("zlib", .{})) |zlib_src| {
+        const zlib = zlibModule(b, zlib_src, target, optimize);
+        const differential = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("test/differential.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "pmdeflate", .module = pmdeflate },
+                .{ .name = "zlib", .module = zlib },
+                .{ .name = "corpus", .module = b.createModule(.{ .root_source_file = b.path("test/corpus.zig") }) },
+            },
+        }) });
+        differential_step.dependOn(&b.addRunArtifact(differential).step);
+    }
+}
+
+fn zlibModule(b: *std.Build, src: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const c = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    c.addIncludePath(src.path("."));
+    c.addCSourceFiles(.{
+        .root = src.path("."),
+        .files = &.{ "adler32.c", "crc32.c", "deflate.c", "inffast.c", "inflate.c", "inftrees.c", "trees.c", "zutil.c" },
+    });
+    const module = b.createModule(.{
+        .root_source_file = b.path("test/zlib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.linkLibrary(b.addLibrary(.{ .name = "z", .root_module = c }));
+    return module;
 }

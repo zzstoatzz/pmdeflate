@@ -3,6 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x2298d66abc450e28,
     .minimum_zig_version = "0.17.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .zlib = .{
+            .url = "https://github.com/madler/zlib/archive/refs/tags/v1.3.2.tar.gz",
+            .lazy = true,
+            .hash = "N-V-__8AAI4ANwDM8MWhHTUFLKfvLE_n2NQk6mh0sFDzhTqO",
+        },
+    },
     .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md" },
 }
