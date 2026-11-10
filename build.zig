@@ -82,6 +82,30 @@ pub fn build(b: *std.Build) void {
             pbt_step.dependOn(&run.step);
         }
     }
+
+    const bench_step = b.step("bench", "compare pmdeflate with zlib on a message corpus, offline");
+    if (b.lazyDependency("zlib", .{})) |zlib_src| {
+        const bench = b.addExecutable(.{
+            .name = "bench",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("bench/bench.zig"),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{ .name = "pmdeflate", .module = b.createModule(.{
+                        .root_source_file = b.path("src/root.zig"),
+                        .target = target,
+                        .optimize = .ReleaseFast,
+                    }) },
+                    .{ .name = "zlib", .module = zlibModule(b, zlib_src, target, .ReleaseFast) },
+                    .{ .name = "corpus", .module = b.createModule(.{ .root_source_file = b.path("test/corpus.zig") }) },
+                },
+            }),
+        });
+        const run = b.addRunArtifact(bench);
+        run.addPassthruArgs();
+        bench_step.dependOn(&run.step);
+    }
 }
 
 fn zlibModule(b: *std.Build, src: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
