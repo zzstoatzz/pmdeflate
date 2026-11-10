@@ -1,0 +1,43 @@
+when:
+  - event: ["push", "pull_request", "manual"]
+    branch: ["main"]
+
+engine: microvm
+image: nixos
+
+dependencies:
+  - coreutils
+  - curl
+  - gnutar
+  - qemu
+  - xz
+  - zstd
+
+environment:
+  ZIG_GLOBAL_CACHE_DIR: /workspace/repo/.zig/global
+
+# the compiler and fetched packages carry over between runs. zig's build
+# cache does not: restored files get new inodes and recompile anyway.
+cache:
+  - key: zig
+    hash: [build.zig.zon, scripts/ci-zig.sh]
+    fallback: true
+    compression-level: 3
+    when: always
+    paths: [.zig]
+
+steps:
+  - name: install pinned zig
+    command: scripts/ci-zig.sh .zig/bin
+  - name: format
+    command: .zig/bin/zig fmt --check build.zig build.zig.zon src test pbt bench
+  - name: RFC 7692 vectors and unit tests
+    command: .zig/bin/zig build test --summary all
+  - name: build for every portable target, wasm included
+    command: .zig/bin/zig build targets --summary all
+  - name: differential against zlib
+    command: .zig/bin/zig build differential --summary all
+  - name: big-endian unit and differential tests under qemu
+    command: .zig/bin/zig build test differential -Dtarget=s390x-linux-musl -fqemu --summary all
+  - name: hegel smoke campaign
+    command: HEGEL_TEST_CASES=200 .zig/bin/zig build pbt --summary all
