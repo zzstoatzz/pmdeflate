@@ -80,6 +80,13 @@ pub fn build(b: *std.Build) void {
             const run = b.addRunArtifact(pbt);
             run.has_side_effects = true;
             pbt_step.dependOn(&run.step);
+
+            // edits sources: run it in a disposable worktree
+            const mutants = b.addRunArtifact(hegel.artifact("hegel-mutants"));
+            mutants.setCwd(b.path("."));
+            mutants.addArgs(&.{ "pbt/mutants.zon", "--", b.graph.zig_exe, "build", "pbt" });
+            mutants.has_side_effects = true;
+            b.step("mutants", "plant each mutant and count the seeds that catch it").dependOn(&mutants.step);
         }
     }
 

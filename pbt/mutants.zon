@@ -1,0 +1,38 @@
+.{
+    .{
+        .name = "finding: a refused message writes one byte past max_len",
+        .file = "src/root.zig",
+        .old = "produced += decoder.reader.stream(out, .limited(room))",
+        .new = "produced += decoder.reader.stream(out, .limited(room + 1))",
+    },
+    .{
+        .name = "deflater keeps its window with context takeover off",
+        .file = "src/root.zig",
+        .old = "if (!self.options.context_takeover) try self.restart();",
+        .new = "if (false) try self.restart();",
+    },
+    .{
+        .name = "inflater drops the window once its buffer passes one window",
+        .file = "src/root.zig",
+        .old = "self.window_used = decoder.reader.end;",
+        .new = "self.window_used = if (decoder.reader.end > window_len) 0 else decoder.reader.end;",
+    },
+    .{
+        .name = "inflater is not poisoned after an error",
+        .file = "src/root.zig",
+        .old = "        self.failed = true;",
+        .new = "        self.failed = false;",
+    },
+    .{
+        .name = "inflater stops after the first BFINAL block",
+        .file = "src/root.zig",
+        .old = "while (in.bufferedLen() > 0) {",
+        .new = "for (0..1) |_| {",
+    },
+    .{
+        .name = "inflater accepts a message one byte over the limit",
+        .file = "src/root.zig",
+        .old = "if (more > 0) return error.MessageTooLarge;",
+        .new = "if (more > 1) return error.MessageTooLarge;",
+    },
+}
