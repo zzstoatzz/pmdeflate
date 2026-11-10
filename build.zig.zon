@@ -9,6 +9,11 @@
             .lazy = true,
             .hash = "N-V-__8AAI4ANwDM8MWhHTUFLKfvLE_n2NQk6mh0sFDzhTqO",
         },
+        .hegel = .{
+            .url = "https://tangled.org/zzstoatzz.io/hegel-zig/archive/4b2bc83a5750bb872524bb97ccb0f6c45a1c3d24.tar.gz",
+            .lazy = true,
+            .hash = "hegel-0.0.0-1OMgSVPimgBXmvl33iniToUkhfm2Ktoi1UrKHDNnpyNl",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "LICENSE", "README.md" },
 }

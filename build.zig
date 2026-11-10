@@ -63,6 +63,25 @@ pub fn build(b: *std.Build) void {
         }) });
         differential_step.dependOn(&b.addRunArtifact(differential).step);
     }
+
+    const pbt_step = b.step("pbt", "hegel property campaigns, offline");
+    if (b.lazyDependency("hegel", .{ .target = target, .optimize = optimize })) |hegel| {
+        if (b.lazyDependency("zlib", .{})) |zlib_src| {
+            const pbt = b.addTest(.{ .root_module = b.createModule(.{
+                .root_source_file = b.path("pbt/properties.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "pmdeflate", .module = pmdeflate },
+                    .{ .name = "zlib", .module = zlibModule(b, zlib_src, target, optimize) },
+                    .{ .name = "hegel", .module = hegel.module("hegel") },
+                },
+            }) });
+            const run = b.addRunArtifact(pbt);
+            run.has_side_effects = true;
+            pbt_step.dependOn(&run.step);
+        }
+    }
 }
 
 fn zlibModule(b: *std.Build, src: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
