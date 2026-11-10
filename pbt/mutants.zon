@@ -12,10 +12,10 @@
         .new = "if (false) try self.restart();",
     },
     .{
-        .name = "inflater drops the window once its buffer passes one window",
+        .name = "inflater drops the window once it fills",
         .file = "src/root.zig",
         .old = "self.window_used = decoder.reader.end;",
-        .new = "self.window_used = if (decoder.reader.end > window_len) 0 else decoder.reader.end;",
+        .new = "self.window_used = if (decoder.reader.end >= window_len) 0 else decoder.reader.end;",
     },
     .{
         .name = "inflater is not poisoned after an error",

@@ -40,16 +40,29 @@ after a message; the corruption property refused 85% of its payloads.
 
 ### calibration
 
-each mutant below was planted in a disposable copy and run for 300 cases on
-seeds 1, 2 and 3 (`HEGEL_SEED`).
+`zig build mutants` plants each entry of `pbt/mutants.zon` and runs the
+campaign under ten seeds at 300 cases. on 2026-11-10 every mutant was caught
+on 10 of 10 seeds and the unmutated baseline passed 10 of 10:
 
 | mutant | caught |
 |---|---|
-| deflater keeps its window with takeover off | 3/3 |
-| inflater keeps one byte less than the window | 0/3 before the window-edge shape, 3/3 after |
-| inflater is not poisoned after an error | 3/3 |
-| inflater stops after the first BFINAL block | 0/3 before data followed BFINAL, 3/3 after |
-| inflater writes one byte past the limit | 3/3, by an integer-overflow panic rather than a property |
+| finding: a refused message writes one byte past `max_len` | 10/10 |
+| deflater keeps its window with takeover off | 10/10 |
+| inflater drops the window once it fills | 10/10 |
+| inflater is not poisoned after an error | 10/10 |
+| inflater stops after the first BFINAL block | 10/10 |
+| inflater accepts a message one byte over the limit | 10/10 |
+
+the first ten-seed run caught three of six. the over-limit mutant returned
+a truncated message and no property compared it with zlib's full length;
+the corruption property now draws intact payloads and limits around the
+message length, and requires a refusal whenever zlib decodes more than the
+limit. the finding mutant crashed on an integer underflow instead of
+failing a property; the remaining room now saturates, so the property sees
+the overrun. the window mutant could never fire, because std keeps exactly
+one window after a rebase, and was replaced by one that does. earlier,
+smaller runs showed the window-edge and split-BFINAL shapes turning
+surviving mutants into kills.
 
 ### findings
 

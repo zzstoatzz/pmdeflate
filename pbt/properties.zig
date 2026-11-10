@@ -248,7 +248,7 @@ fn zlibEncodes(_: void, case: *hegel.TestCase) !void {
     }
 }
 
-const Corruption = enum { flip_bit, truncate, append, splice_noise, replace };
+const Corruption = enum { none, flip_bit, truncate, append, splice_noise, replace };
 
 /// a corrupted payload is refused or decoded within the limit; never a crash.
 /// when both decoders accept it, they agree. an inflater that refused a
@@ -289,6 +289,7 @@ fn corruptedPayloads(_: void, case: *hegel.TestCase) !void {
     const how: Corruption = @fromBackingInt(@intCast(try case.index(std.meta.tags(Corruption).len)));
     var noise: [64]u8 = undefined;
     switch (how) {
+        .none => {},
         .flip_bit => if (corrupt.items.len > 0) {
             corrupt.items[try case.index(corrupt.items.len)] ^= @as(u8, 1) << @intCast(try case.int(u3, 0, 7));
         },
@@ -305,7 +306,12 @@ fn corruptedPayloads(_: void, case: *hegel.TestCase) !void {
     }
     case.note("{t} -> {d} payload bytes", .{ how, corrupt.items.len });
 
-    const limit = try case.int(usize, 0, max_message);
+    // limits around the message length are where an off-by-one hides
+    const limit = switch (try case.index(3)) {
+        0 => message.len -| try case.int(usize, 0, 2),
+        1 => message.len + try case.int(usize, 0, 2),
+        else => try case.int(usize, 0, max_message),
+    };
     decoded.clearRetainingCapacity();
     const ours = inflater.decompress(corrupt.items, &decoded.writer, limit);
     if (decoded.written().len > limit) return case.fail("wrote past the limit");
@@ -315,12 +321,15 @@ fn corruptedPayloads(_: void, case: *hegel.TestCase) !void {
         oracle_out.clearRetainingCapacity();
         if (oracle.decompress(gpa, corrupt.items, &oracle_out)) {
             case.event("zlib accepted it too");
-            if (oracle_out.items.len <= limit and !std.mem.eql(u8, oracle_out.items, decoded.written()))
+            if (oracle_out.items.len > limit) return case.fail("accepts a message larger than the limit");
+            if (!std.mem.eql(u8, oracle_out.items, decoded.written()))
                 return case.fail("pmdeflate and zlib accept a payload but disagree on its message");
         } else |_| {}
     } else |err| {
         case.event("pmdeflate refused the corrupted payload");
         case.note("pmdeflate: {t}", .{err});
+        if (how == .none and (err != error.MessageTooLarge or message.len <= limit))
+            return case.fail("refuses an intact payload");
         decoded.clearRetainingCapacity();
         if (inflater.decompress("\x00", &decoded.writer, 0)) |_|
             return case.fail("a failed inflater accepts the next message")
