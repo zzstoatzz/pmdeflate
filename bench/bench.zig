@@ -1,6 +1,6 @@
 //! pmdeflate against zlib 1.3.2 on one message corpus, offline.
 //!
-//! usage: zig build bench -- [--frames path] [--trials n]
+//! usage: zig build bench -- [--frames path] [--trials n] [--out dir] [--commit sha]
 //!
 //! `--frames` reads length-prefixed messages (u32 big-endian count, then a
 //! u32 big-endian length before each message), the format of atproto-bench's
@@ -169,12 +169,20 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena.allocator());
 
     var frames_path: ?[]const u8 = null;
+    var out_dir: ?[]const u8 = null;
+    var commit: []const u8 = "unrecorded";
     var trials: usize = 7;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--frames")) {
             i += 1;
             frames_path = args[i];
+        } else if (std.mem.eql(u8, args[i], "--out")) {
+            i += 1;
+            out_dir = args[i];
+        } else if (std.mem.eql(u8, args[i], "--commit")) {
+            i += 1;
+            commit = args[i];
         } else if (std.mem.eql(u8, args[i], "--trials")) {
             i += 1;
             trials = try std.fmt.parseInt(usize, args[i], 10);
@@ -184,8 +192,12 @@ pub fn main(init: std.process.Init) !void {
     var test_corpus: ?corpus.Corpus = null;
     defer if (test_corpus) |*c| c.deinit();
     var messages: std.ArrayList([]const u8) = .empty;
+    var corpus_sha: [64]u8 = @splat('0');
     const label = if (frames_path) |path| blk: {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, arena.allocator(), .unlimited);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        corpus_sha = std.fmt.bytesToHex(digest, .lower);
         const count = std.mem.readInt(u32, bytes[0..4], .big);
         var at: usize = 4;
         for (0..count) |_| {
@@ -198,6 +210,9 @@ pub fn main(init: std.process.Init) !void {
     } else blk: {
         test_corpus = try corpus.build(gpa);
         try messages.appendSlice(arena.allocator(), test_corpus.?.messages.items);
+        var hasher: std.crypto.hash.sha2.Sha256 = .init(.{});
+        for (messages.items) |m| hasher.update(m);
+        corpus_sha = std.fmt.bytesToHex(hasher.finalResult(), .lower);
         break :blk "test/corpus.zig";
     };
     var raw_bytes: u64 = 0;
@@ -236,10 +251,30 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    if (out_dir) |dir_path| {
+        // raw samples and the environment, kept next to the report
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(io, dir_path, .{});
+        defer dir.close(io);
+        var csv: std.Io.Writer.Allocating = .init(gpa);
+        defer csv.deinit();
+        try csv.writer.print("trial,codec,level,takeover,encode_ns,decode_ns,payload_bytes,raw_bytes\n", .{});
+        for (0..trials) |trial| for (configs, 0..) |config, c| {
+            try csv.writer.print("{d},{t},{d},{},{d},{d},{d},{d}\n", .{ trial, config.codec, config.level, config.takeover, encode[c][trial], decode[c][trial], sizes[c], raw_bytes });
+        };
+        try dir.writeFile(io, .{ .sub_path = "samples.csv", .data = csv.written() });
+        var env: std.Io.Writer.Allocating = .init(gpa);
+        defer env.deinit();
+        try env.writer.print(
+            \\{{"pmdeflate_commit":"{s}","zig":"{s}","zlib":"1.3.2","target":"{t}-{t}","cpu":"{s}","optimize":"ReleaseFast","corpus":"{s}","corpus_sha256":"{s}","messages":{d},"raw_bytes":{d},"trials":{d},"warmup_passes":1,"order":"alternating per trial"}}
+            \\
+        , .{ commit, @import("builtin").zig_version_string, @import("builtin").cpu.arch, @import("builtin").os.tag, @import("builtin").cpu.model.name, label, &corpus_sha, messages.items.len, raw_bytes, trials });
+        try dir.writeFile(io, .{ .sub_path = "environment.json", .data = env.written() });
+    }
+
     var stdout_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
     const w = &stdout.interface;
-    try w.print("corpus: {s}, {d} messages, {d} bytes; {d} trials, median shown\n\n", .{ label, messages.items.len, raw_bytes, trials });
+    try w.print("corpus: {s}, {d} messages, {d} bytes; {d} trials: median (min–max)\n\n", .{ label, messages.items.len, raw_bytes, trials });
     try w.print("| codec | level | takeover | payload / raw | encode MB/s | decode MB/s | heap per connection |\n", .{});
     try w.print("|---|---:|---|---:|---:|---:|---:|\n", .{});
     for (configs, 0..) |config, c| {
@@ -248,13 +283,20 @@ pub fn main(init: std.process.Init) !void {
                 return @as(f64, @floatFromInt(bytes)) / 1e6 / (@as(f64, @floatFromInt(ns)) / 1e9);
             }
         }.f;
-        try w.print("| {t} | {d} | {s} | {d:.4} | {d:.1} | {d:.1} | {d} KiB |\n", .{
+        const enc_med = median(encode[c]);
+        const dec_med = median(decode[c]);
+        // sorted by median(); the fastest trial has the fewest ns
+        try w.print("| {t} | {d} | {s} | {d:.4} | {d:.1} ({d:.1}–{d:.1}) | {d:.1} ({d:.1}–{d:.1}) | {d} KiB |\n", .{
             config.codec,
             config.level,
             if (config.takeover) "on" else "off",
             @as(f64, @floatFromInt(sizes[c])) / @as(f64, @floatFromInt(raw_bytes)),
-            mbs(raw_bytes, median(encode[c])),
-            mbs(raw_bytes, median(decode[c])),
+            mbs(raw_bytes, enc_med),
+            mbs(raw_bytes, encode[c][trials - 1]),
+            mbs(raw_bytes, encode[c][0]),
+            mbs(raw_bytes, dec_med),
+            mbs(raw_bytes, decode[c][trials - 1]),
+            mbs(raw_bytes, decode[c][0]),
             try footprint(gpa, config, messages.items[0]) / 1024,
         });
     }
