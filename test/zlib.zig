@@ -90,6 +90,48 @@ pub const Deflater = struct {
 
 extern fn inflateSetDictionary(strm: *z_stream, dictionary: [*]const u8, dict_length: uInt) c_int;
 
+/// zlib as a production codec drives it, for the bench: the payload and then
+/// the tail go in as two inputs, zlib keeps its own window, and output lands
+/// directly in `out`. it does not continue past a BFINAL block, which an
+/// encoder's sync-flushed payloads never contain; the oracle below does.
+pub const StreamInflater = struct {
+    stream: z_stream = .{},
+    context_takeover: bool,
+
+    pub fn create(gpa: std.mem.Allocator, context_takeover: bool) !*StreamInflater {
+        const self = try gpa.create(StreamInflater);
+        self.* = .{ .context_takeover = context_takeover };
+        if (inflateInit2_(&self.stream, -15, version, @sizeOf(z_stream)) != Z_OK) return error.ZlibInit;
+        return self;
+    }
+
+    pub fn destroy(self: *StreamInflater, gpa: std.mem.Allocator) void {
+        _ = inflateEnd(&self.stream);
+        gpa.destroy(self);
+    }
+
+    pub fn decompress(self: *StreamInflater, gpa: std.mem.Allocator, payload: []const u8, out: *std.ArrayList(u8)) !void {
+        if (!self.context_takeover and inflateReset(&self.stream) != Z_OK) return error.ZlibReset;
+        for ([_][]const u8{ payload, "\x00\x00\xff\xff" }) |input| {
+            self.stream.next_in = input.ptr;
+            self.stream.avail_in = @intCast(input.len);
+            while (true) {
+                try out.ensureUnusedCapacity(gpa, 16 * 1024);
+                const room = out.unusedCapacitySlice();
+                self.stream.next_out = room.ptr;
+                self.stream.avail_out = @intCast(room.len);
+                const rc = inflate(&self.stream, Z_SYNC_FLUSH);
+                out.items.len += room.len - self.stream.avail_out;
+                switch (rc) {
+                    Z_OK, Z_BUF_ERROR => {},
+                    else => return error.ZlibInvalid,
+                }
+                if (self.stream.avail_in == 0 and self.stream.avail_out != 0) break;
+            }
+        }
+    }
+};
+
 pub const Inflater = struct {
     stream: z_stream = .{},
     context_takeover: bool,

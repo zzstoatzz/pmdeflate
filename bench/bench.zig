@@ -112,7 +112,10 @@ fn runZlib(io: std.Io, gpa: std.mem.Allocator, messages: []const []const u8, con
         @memcpy(slot.*, payload);
     }
     const t1 = now(io);
-    const inflater = try zlib.Inflater.create(gpa, config.takeover);
+    // the stream inflater, not the oracle: the oracle rebuilds a 32 KiB
+    // history after every message to continue past BFINAL blocks, which a
+    // production codec does not, and which would slow zlib on small messages
+    const inflater = try zlib.StreamInflater.create(gpa, config.takeover);
     defer inflater.destroy(gpa);
     var out: std.ArrayList(u8) = try .initCapacity(gpa, 1 << 20);
     defer out.deinit(gpa);
