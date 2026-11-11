@@ -120,3 +120,24 @@ test "trim gives back a deflater's grown buffer and keeps its window" {
     _ = try inflater.decompress(payload, &out.writer, 8 << 20);
     try t.expectEqualSlices(u8, repeat, out.written());
 }
+
+test "matches at every distance class decode to the message" {
+    // a run of period p repeats at distance p, which exercises each of the
+    // match copies: 1, 2 to 7, 8 to 15, and 16 or more bytes back
+    const deflater = try pmdeflate.Deflater.create(t.allocator, .{});
+    defer deflater.destroy();
+    const inflater = try pmdeflate.Inflater.create(t.allocator, .{});
+    defer inflater.destroy();
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    var message: [3000]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(5);
+    for (1..41) |period| {
+        var seed: [40]u8 = undefined;
+        prng.random().bytes(&seed);
+        for (&message, 0..) |*byte, k| byte.* = seed[k % period];
+        out.clearRetainingCapacity();
+        _ = try inflater.decompress(try deflater.compress(&message), &out.writer, message.len);
+        try t.expectEqualSlices(u8, &message, out.written());
+    }
+}

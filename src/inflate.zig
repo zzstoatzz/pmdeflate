@@ -309,7 +309,8 @@ fn stored(gpa: Allocator, bits: *Bits, out: *Output) Error!void {
     bits.pos += len;
 }
 
-/// bytes a match copy may write past its end: copies move whole 8-byte words
+/// bytes a match copy may write past its end: copies move whole 8- or 16-byte
+/// chunks, so the last one can run up to 14 bytes over
 const copy_slack = 16;
 
 /// decodes symbols while the next word of input is in the payload and the
@@ -424,7 +425,7 @@ inline fn copyMatch(ptr: [*]u8, at: usize, distance: usize, length: usize) void 
         // each chunk read lies wholly before the bytes this copy writes next
         var i: usize = 0;
         while (i < length) : (i += 16) {
-            const chunk: @Vector(16, u8) = @as(*align(1) const [16]u8, @ptrCast(src + i)).*;
+            const chunk: [16]u8 = @as(*align(1) const [16]u8, @ptrCast(src + i)).*;
             @as(*align(1) [16]u8, @ptrCast(dst + i)).* = chunk;
         }
     } else if (distance >= 8) {
@@ -442,10 +443,11 @@ inline fn copyMatch(ptr: [*]u8, at: usize, distance: usize, length: usize) void 
         // write it in steps of the largest multiple of `distance` that fits
         var pattern: [8]u8 = undefined;
         for (0..8) |k| pattern[k] = src[k % distance];
-        const word: u64 = @bitCast(pattern);
+        // stored as bytes: a bitcast to an integer is not byte order on
+        // big-endian targets
         const step = 8 - 8 % distance;
         var i: usize = 0;
-        while (i < length) : (i += step) @as(*align(1) u64, @ptrCast(dst + i)).* = word;
+        while (i < length) : (i += step) @as(*align(1) [8]u8, @ptrCast(dst + i)).* = pattern;
     }
 }
 
