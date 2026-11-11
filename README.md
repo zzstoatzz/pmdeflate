@@ -21,7 +21,7 @@ turn `context_takeover` off for a direction when `client_no_context_takeover` or
 ## install
 
 ```sh
-zig fetch --save=pmdeflate https://tangled.org/zzstoatzz.io/pmdeflate/archive/v0.1.0.tar.gz
+zig fetch --save=pmdeflate https://tangled.org/zzstoatzz.io/pmdeflate/archive/v0.1.1.tar.gz
 ```
 
 ```zig

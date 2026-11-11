@@ -1,6 +1,6 @@
 .{
     .name = .pmdeflate,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0x2298d66abc450e28,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
