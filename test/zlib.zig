@@ -88,9 +88,13 @@ pub const Deflater = struct {
     }
 };
 
+extern fn inflateSetDictionary(strm: *z_stream, dictionary: [*]const u8, dict_length: uInt) c_int;
+
 pub const Inflater = struct {
     stream: z_stream = .{},
     context_takeover: bool,
+    /// the last 32 KiB of output, to continue past a BFINAL block
+    history: std.ArrayList(u8) = .empty,
 
     pub fn create(gpa: std.mem.Allocator, context_takeover: bool) !*Inflater {
         const self = try gpa.create(Inflater);
@@ -101,32 +105,24 @@ pub const Inflater = struct {
 
     pub fn destroy(self: *Inflater, gpa: std.mem.Allocator) void {
         _ = inflateEnd(&self.stream);
+        self.history.deinit(gpa);
         gpa.destroy(self);
     }
 
-    /// decode a payload that holds no BFINAL block (zlib ends the stream
-    /// there); appends the message to `out`
+    /// decode one payload and append the message to `out`. at a BFINAL
+    /// block zlib ends the stream; RFC 7692 7.2.3.4 continues with the same
+    /// window, so the oracle restarts with the history as its dictionary.
     pub fn decompress(self: *Inflater, gpa: std.mem.Allocator, payload: []const u8, out: *std.ArrayList(u8)) !void {
-        if (!self.context_takeover and inflateReset(&self.stream) != Z_OK) return error.ZlibReset;
-        for ([_][]const u8{ payload, "\x00\x00\xff\xff" }) |chunk| {
-            self.stream.next_in = chunk.ptr;
-            self.stream.avail_in = @intCast(chunk.len);
-            while (self.stream.avail_in > 0) {
-                try out.ensureUnusedCapacity(gpa, 16 * 1024);
-                const room = out.unusedCapacitySlice();
-                self.stream.next_out = room.ptr;
-                self.stream.avail_out = @intCast(room.len);
-                const rc = inflate(&self.stream, Z_SYNC_FLUSH);
-                out.items.len += room.len - self.stream.avail_out;
-                switch (rc) {
-                    Z_OK => {},
-                    Z_BUF_ERROR => if (self.stream.avail_out != 0) break,
-                    Z_STREAM_END => return error.ZlibStreamEnd,
-                    else => return error.ZlibInvalid,
-                }
-            }
+        if (!self.context_takeover) {
+            if (inflateReset(&self.stream) != Z_OK) return error.ZlibReset;
+            self.history.clearRetainingCapacity();
         }
-        // drain output still held after the input is consumed
+        const start = out.items.len;
+        const input = try std.mem.concat(gpa, u8, &.{ payload, "\x00\x00\xff\xff" });
+        defer gpa.free(input);
+        var ended = false;
+        self.stream.next_in = input.ptr;
+        self.stream.avail_in = @intCast(input.len);
         while (true) {
             try out.ensureUnusedCapacity(gpa, 16 * 1024);
             const room = out.unusedCapacitySlice();
@@ -134,8 +130,38 @@ pub const Inflater = struct {
             self.stream.avail_out = @intCast(room.len);
             const rc = inflate(&self.stream, Z_SYNC_FLUSH);
             out.items.len += room.len - self.stream.avail_out;
-            if (rc == Z_BUF_ERROR or self.stream.avail_out != 0) break;
-            if (rc != Z_OK) return error.ZlibInvalid;
+            switch (rc) {
+                Z_OK => {},
+                Z_BUF_ERROR => if (self.stream.avail_in == 0) break,
+                Z_STREAM_END => {
+                    ended = true;
+                    if (self.stream.avail_in == 0) break;
+                    ended = false;
+                    const dictionary = try self.window(gpa, out.items[start..]);
+                    defer gpa.free(dictionary);
+                    if (inflateReset(&self.stream) != Z_OK) return error.ZlibReset;
+                    if (dictionary.len > 0 and inflateSetDictionary(&self.stream, dictionary.ptr, @intCast(dictionary.len)) != Z_OK)
+                        return error.ZlibDictionary;
+                    continue;
+                },
+                else => return error.ZlibInvalid,
+            }
+            if (self.stream.avail_in == 0 and self.stream.avail_out != 0) break;
         }
+        // zlib streams: input that stops mid-block only waits for more. a
+        // payload is complete when all of it is consumed at a block
+        // boundary (data_type bit 128) or the stream ended there
+        if (self.stream.avail_in != 0 or (!ended and self.stream.data_type & 128 == 0)) return error.ZlibIncomplete;
+        const next = try self.window(gpa, out.items[start..]);
+        defer gpa.free(next);
+        self.history.clearRetainingCapacity();
+        try self.history.appendSlice(gpa, next);
+    }
+
+    /// the last 32 KiB of the earlier messages followed by `produced`
+    fn window(self: *const Inflater, gpa: std.mem.Allocator, produced: []const u8) ![]u8 {
+        const joined = try std.mem.concat(gpa, u8, &.{ self.history.items, produced });
+        defer gpa.free(joined);
+        return gpa.dupe(u8, joined[joined.len - @min(joined.len, 32 * 1024) ..]);
     }
 };
