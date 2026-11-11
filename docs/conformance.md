@@ -49,9 +49,10 @@ back, repeats, and message data after a BFINAL block.
 ### calibration
 
 `zig build mutants` plants each entry of `pbt/mutants.zon` and runs the
-campaign under ten seeds at 300 cases. on 2026-11-11, against the
-table-driven inflater reading payloads in place, the unmutated baseline
-passed 10 of 10:
+campaign under ten seeds at 300 cases. on 2026-11-11 each mutant ran on its
+own Fly `performance-1x` machine against `7b92c64`, and the unmutated baseline
+passed 10 of 10 on every machine. the fast-loop mutants were rerun against
+`c3bc56f`'s properties:
 
 | mutant | caught |
 |---|---|
@@ -65,6 +66,20 @@ passed 10 of 10:
 | a stored block's NLEN is not checked | 10/10 |
 | 287 or 288 length symbols, or 31 or 32 distance symbols, are accepted | 10/10 |
 | input left over at the end of a payload is accepted | 10/10 |
+| fast path: unrolled literals ignore the limit | 6/10 |
+| fast path: a literal ignores the limit | 7/10 |
+| fast path: a match ignores the limit | 10/10 |
+| fast path: a short-distance pattern steps a whole word | 10/10 |
+| fast path: 16-byte copies overlap their source | 10/10 |
+| fast path: a distance past the history is accepted | crashes 10/10 |
+
+a fast-loop limit check that goes missing is invisible on most payloads: the
+next symbol trips the careful path's check, so the message is refused
+anyway. it shows only when the message's last symbol is decoded in the fast
+loop, which the end of a payload never is, so the corrupted-payload property
+sometimes pads a payload with empty stored blocks, as RFC 7692 allows. the
+distance mutant reads before the output buffer and crashes the test run on
+every seed: caught, but not by a property.
 
 what the earlier runs exposed, in order:
 
