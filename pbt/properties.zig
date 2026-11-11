@@ -381,7 +381,7 @@ const BitWriter = struct {
     }
 };
 
-const Header = enum { valid, incomplete, oversubscribed, no_end_of_block, too_many_lengths, too_many_distances, stored, stored_bad_nlen };
+const Header = enum { valid, incomplete, oversubscribed, no_end_of_block, too_many_lengths, too_many_distances, stored, stored_bad_nlen, stored_short };
 
 /// canonical Huffman codes (RFC 1951 3.2.2) for `lengths`
 fn canonicalCodes(lengths: []const u8, codes: []u32) void {
@@ -415,12 +415,21 @@ fn generatedBlocks(_: void, case: *hegel.TestCase) !void {
     var message: [24]u8 = undefined;
     var message_len: usize = 0;
 
-    if (header == .stored or header == .stored_bad_nlen) {
+    if (header == .stored or header == .stored_bad_nlen or header == .stored_short) {
         message_len = try case.int(usize, 0, message.len);
         for (message[0..message_len]) |*byte| byte.* = try case.int(u8, 0, 255);
-        try w.put(0, 3); // not final, stored
+        // a short block claims more bytes than it carries, reaching into the
+        // receiver's appended 00 00 ff ff. it is final, so no later block
+        // can rescue the read
+        const final: u32 = if (header == .stored_short) 1 else 0;
+        try w.put(final, 1);
+        try w.put(0, 2); // stored
         try w.finish();
-        const len: u16 = @intCast(message_len);
+        // a padding byte and the 4-byte tail follow the block: a shortfall
+        // of 5 ends inside them, and 6 or more reaches past both
+        const shortfalls = [_]usize{ 5, 6, 7, 8, 9, 10, 11 };
+        const shortfall: usize = if (header == .stored_short) shortfalls[try case.index(shortfalls.len)] else 0;
+        const len: u16 = @intCast(message_len + shortfall);
         var nlen: u16 = ~len;
         if (header == .stored_bad_nlen) nlen ^= @as(u16, 1) << @intCast(try case.int(u4, 0, 15));
         try w.put(len, 16);
