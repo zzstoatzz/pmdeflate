@@ -87,8 +87,12 @@ const dist_base = [30]u16{ 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129,
 const dist_extra = [30]u4{ 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
 const codelen_order = [19]u8{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
 
+/// reads the payload in place, then `tail` as if it followed: RFC 7692 has the
+/// receiver append the 00 00 ff ff the sender stripped, and reading it
+/// virtually spares a copy of every payload
 const Bits = struct {
-    input: []const u8,
+    payload: []const u8,
+    tail: []const u8,
     pos: usize = 0,
     buf: u64 = 0,
     count: u7 = 0,
@@ -96,18 +100,31 @@ const Bits = struct {
     /// make at least 56 bits available, or every remaining input bit.
     /// reading past the end of input is an error at `need`.
     inline fn refill(self: *Bits) void {
-        if (self.pos + 8 <= self.input.len) {
-            const word = std.mem.readInt(u64, self.input[self.pos..][0..8], .little);
+        if (self.pos + 8 <= self.payload.len) {
+            const word = std.mem.readInt(u64, self.payload[self.pos..][0..8], .little);
             self.buf |= word << @intCast(self.count);
             self.pos += (63 - @as(usize, self.count)) >> 3;
             self.count |= 56;
             return;
         }
-        while (self.count <= 56 and self.pos < self.input.len) {
-            self.buf |= @as(u64, self.input[self.pos]) << @intCast(self.count);
+        while (self.count <= 56 and self.pos < self.size()) {
+            self.buf |= @as(u64, self.byteAt(self.pos)) << @intCast(self.count);
             self.pos += 1;
             self.count += 8;
         }
+    }
+
+    inline fn size(self: *const Bits) usize {
+        return self.payload.len + self.tail.len;
+    }
+
+    inline fn byteAt(self: *const Bits, i: usize) u8 {
+        return if (i < self.payload.len) self.payload[i] else self.tail[i - self.payload.len];
+    }
+
+    /// all input consumed at a block boundary: the end of a complete message
+    inline fn done(self: *const Bits) bool {
+        return self.count == 0 and self.pos == self.size();
     }
 
     inline fn need(self: *Bits, n: u7) error{InvalidData}!void {
@@ -214,26 +231,24 @@ pub const Decoder = struct {
         self.tables.init();
     }
 
-    /// decode every DEFLATE stream in `input` into `out`, after its window.
-    /// streams follow one another when a BFINAL block ends one early.
-    pub fn decodeAll(self: *Decoder, gpa: Allocator, input: []const u8, out: *Output) Error!void {
-        var bits: Bits = .{ .input = input };
-        while (bits.pos < input.len) {
-            while (true) {
-                try bits.need(3);
-                const final = bits.take(1) == 1;
-                switch (bits.take(2)) {
-                    0 => try stored(gpa, &bits, out),
-                    1 => try huffman(gpa, &bits, out, &self.tables.fixed_litlen, &self.tables.fixed_dist),
-                    2 => {
-                        try self.dynamicTables(&bits);
-                        try huffman(gpa, &bits, out, &self.tables.litlen, &self.tables.dist);
-                    },
-                    else => return error.InvalidData,
-                }
-                if (final) break;
+    /// decode `payload` followed by `tail` into `out`, after its window. the
+    /// input must end exactly at a block boundary; a BFINAL block ends one
+    /// DEFLATE stream and the next byte starts another with the same window.
+    pub fn decodeAll(self: *Decoder, gpa: Allocator, payload: []const u8, tail: []const u8, out: *Output) Error!void {
+        var bits: Bits = .{ .payload = payload, .tail = tail };
+        while (!bits.done()) {
+            try bits.need(3);
+            const final = bits.take(1) == 1;
+            switch (bits.take(2)) {
+                0 => try stored(gpa, &bits, out),
+                1 => try huffman(gpa, &bits, out, &self.tables.fixed_litlen, &self.tables.fixed_dist),
+                2 => {
+                    try self.dynamicTables(&bits);
+                    try huffman(gpa, &bits, out, &self.tables.litlen, &self.tables.dist);
+                },
+                else => return error.InvalidData,
             }
-            bits.alignToByte();
+            if (final) bits.alignToByte();
         }
     }
 
@@ -279,15 +294,18 @@ pub const Decoder = struct {
 
 fn stored(gpa: Allocator, bits: *Bits, out: *Output) Error!void {
     bits.alignToByte();
-    const input = bits.input;
-    if (bits.pos + 4 > input.len) return error.InvalidData;
-    const len = std.mem.readInt(u16, input[bits.pos..][0..2], .little);
-    const nlen = std.mem.readInt(u16, input[bits.pos + 2 ..][0..2], .little);
+    if (bits.pos + 4 > bits.size()) return error.InvalidData;
+    const p = bits.pos;
+    const len = @as(u16, bits.byteAt(p)) | @as(u16, bits.byteAt(p + 1)) << 8;
+    const nlen = @as(u16, bits.byteAt(p + 2)) | @as(u16, bits.byteAt(p + 3)) << 8;
     if (len != ~nlen) return error.InvalidData;
     bits.pos += 4;
-    if (bits.pos + len > input.len) return error.InvalidData;
+    if (bits.pos + len > bits.size()) return error.InvalidData;
     if (len > out.room()) return error.MessageTooLarge;
-    try out.buf.appendSlice(gpa, input[bits.pos..][0..len]);
+    // the data may run from the payload into the tail
+    const in_payload = bits.payload[@min(bits.pos, bits.payload.len)..@min(bits.pos + len, bits.payload.len)];
+    try out.buf.appendSlice(gpa, in_payload);
+    for (bits.pos + in_payload.len..bits.pos + len) |i| try out.buf.append(gpa, bits.byteAt(i));
     bits.pos += len;
 }
 

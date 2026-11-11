@@ -116,8 +116,6 @@ pub const Inflater = struct {
     decoder: *inflate.Decoder,
     /// the window from earlier messages, then the message being decoded
     output: inflate.Output = .{},
-    /// payload plus the appended tails, reused between messages
-    input: std.ArrayList(u8) = .empty,
     failed: bool = false,
 
     pub const Options = struct {
@@ -151,7 +149,6 @@ pub const Inflater = struct {
 
     pub fn destroy(self: *Inflater) void {
         const gpa = self.gpa;
-        self.input.deinit(gpa);
         self.output.buf.deinit(gpa);
         gpa.destroy(self.decoder);
         gpa.destroy(self);
@@ -171,21 +168,13 @@ pub const Inflater = struct {
         self.failed = true;
         if (!self.options.context_takeover) self.output.buf.clearRetainingCapacity();
 
-        // RFC 7692 7.2.2: append the sync-flush tail. then end the stream
-        // with a final empty stored block, so the decoder finishes instead of
-        // waiting for a next message that is not there.
-        const tail = "\x00\x00\xff\xff" ++ "\x01\x00\x00\xff\xff";
-        self.input.clearRetainingCapacity();
-        try self.input.ensureTotalCapacity(self.gpa, payload.len + tail.len);
-        self.input.appendSliceAssumeCapacity(payload);
-        self.input.appendSliceAssumeCapacity(tail);
-
         const output = &self.output;
         output.window_end = output.buf.items.len;
         output.limit = max_len;
-        // a payload may hold blocks with BFINAL set (RFC 7692 7.2.3.4); each
+        // RFC 7692 7.2.2: the payload followed by the sync-flush tail the sender
+        // stripped. a payload may hold blocks with BFINAL set (7.2.3.4); each
         // ends a DEFLATE stream, and the next continues with the same window
-        try self.decoder.decodeAll(self.gpa, self.input.items, output);
+        try self.decoder.decodeAll(self.gpa, payload, "\x00\x00\xff\xff", output);
         const message = output.buf.items[output.window_end..];
         try out.writeAll(message);
 
@@ -206,5 +195,6 @@ pub const Inflater = struct {
 
 test {
     _ = @import("rfc7692_test.zig");
+    _ = @import("review_test.zig");
     _ = @import("inflate.zig");
 }

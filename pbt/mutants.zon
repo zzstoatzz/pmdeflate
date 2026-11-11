@@ -26,8 +26,8 @@
     .{
         .name = "inflater stops after the first BFINAL block",
         .file = "src/inflate.zig",
-        .old = "while (bits.pos < input.len) {",
-        .new = "for (0..1) |_| {",
+        .old = "if (final) bits.alignToByte();",
+        .new = "if (final) return;",
     },
     .{
         .name = "inflater writes a literal past the limit",
