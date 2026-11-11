@@ -1,0 +1,33 @@
+# started by hand: `tg pipeline trigger main -w bench.yml`. one VM type, so
+# runs compare with each other; the generated corpus, since the relay
+# frames are not in the repository.
+when:
+  - event: ["manual"]
+
+engine: microvm
+image: nixos
+
+dependencies:
+  - coreutils
+  - curl
+  - gnutar
+  - xz
+
+environment:
+  ZIG_GLOBAL_CACHE_DIR: /workspace/repo/.zig/global
+
+cache:
+  - key: zig
+    hash: [build.zig.zon, scripts/ci-zig.sh]
+    fallback: true
+    compression-level: 3
+    when: always
+    paths: [.zig]
+
+steps:
+  - name: install pinned zig
+    command: scripts/ci-zig.sh .zig/bin
+  - name: machine
+    command: nproc; free -m; uname -a
+  - name: bench, 7 trials
+    command: .zig/bin/zig build bench -- --trials 7 --commit "$TANGLED_SHA" --out bench-out && cat bench-out/environment.json
