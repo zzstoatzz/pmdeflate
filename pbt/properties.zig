@@ -43,10 +43,12 @@ fn copyBack(history: []const []const u8, back: usize, out: []u8) bool {
 /// of earlier ones are common instead of rare
 fn drawMessage(case: *hegel.TestCase, buf: []u8, history: []const []const u8) ![]const u8 {
     const shape: Shape = @fromBackingInt(@intCast(try case.index(std.meta.tags(Shape).len)));
-    const len = switch (try case.index(4)) {
+    const len = switch (try case.index(5)) {
         0 => try case.int(usize, 0, 64),
         1 => try case.int(usize, 0, 2048),
         2 => try case.int(usize, 32 * 1024 - 64, 32 * 1024 + 64),
+        // large messages fill the inflater's history past where it compacts
+        3 => try case.int(usize, max_message - 16 * 1024, max_message),
         else => try case.int(usize, 0, max_message),
     };
     switch (shape) {
@@ -187,13 +189,10 @@ fn pmdeflateEncodes(_: void, case: *hegel.TestCase) !void {
                     return case.fail("pmdeflate decodes its own payload differently");
 
                 oracle_out.clearRetainingCapacity();
-                for ([_][]const u8{ first.items, second }, 0..) |part, i| {
-                    if (i == 1 and parts[1].len == 0) break;
-                    oracle.decompress(gpa, part, &oracle_out) catch |err| {
-                        case.note("zlib: {t}", .{err});
-                        return case.fail("zlib refuses a pmdeflate payload");
-                    };
-                }
+                oracle.decompress(gpa, ours.items, &oracle_out) catch |err| {
+                    case.note("zlib: {t}", .{err});
+                    return case.fail("zlib refuses a pmdeflate payload");
+                };
                 if (!std.mem.eql(u8, message, oracle_out.items))
                     return case.fail("zlib decodes a pmdeflate payload differently");
                 try history.add(message);
@@ -307,27 +306,32 @@ fn corruptedPayloads(_: void, case: *hegel.TestCase) !void {
     case.note("{t} -> {d} payload bytes", .{ how, corrupt.items.len });
 
     // limits around the message length are where an off-by-one hides
-    const limit = switch (try case.index(3)) {
-        0 => message.len -| try case.int(usize, 0, 2),
-        1 => message.len + try case.int(usize, 0, 2),
+    const limit = switch (try case.index(5)) {
+        0 => message.len -| 1,
+        1 => message.len,
+        2 => message.len -| try case.int(usize, 2, 3),
+        3 => message.len + try case.int(usize, 1, 2),
         else => try case.int(usize, 0, max_message),
     };
     decoded.clearRetainingCapacity();
     const ours = inflater.decompress(corrupt.items, &decoded.writer, limit);
     if (decoded.written().len > limit) return case.fail("wrote past the limit");
+    // zlib decodes without a limit; pmdeflate must accept exactly what zlib
+    // accepts within the limit, and produce the same message
+    oracle_out.clearRetainingCapacity();
+    const zlib_ok = if (oracle.decompress(gpa, corrupt.items, &oracle_out)) true else |_| false;
+    const zlib_accepts = zlib_ok and oracle_out.items.len <= limit;
     if (ours) |n| {
-        case.event("pmdeflate accepted the corrupted payload");
+        case.event("pmdeflate accepted the payload");
         if (n != decoded.written().len) return case.fail("returned length differs from bytes written");
-        oracle_out.clearRetainingCapacity();
-        if (oracle.decompress(gpa, corrupt.items, &oracle_out)) {
-            case.event("zlib accepted it too");
-            if (oracle_out.items.len > limit) return case.fail("accepts a message larger than the limit");
-            if (!std.mem.eql(u8, oracle_out.items, decoded.written()))
-                return case.fail("pmdeflate and zlib accept a payload but disagree on its message");
-        } else |_| {}
+        if (!zlib_ok) return case.fail("pmdeflate accepts a payload zlib refuses");
+        if (!zlib_accepts) return case.fail("accepts a message larger than the limit");
+        if (!std.mem.eql(u8, oracle_out.items, decoded.written()))
+            return case.fail("pmdeflate and zlib accept a payload but disagree on its message");
     } else |err| {
-        case.event("pmdeflate refused the corrupted payload");
+        case.event("pmdeflate refused the payload");
         case.note("pmdeflate: {t}", .{err});
+        if (zlib_accepts) return case.fail("pmdeflate refuses a payload zlib accepts within the limit");
         if (how == .none and (err != error.MessageTooLarge or message.len <= limit))
             return case.fail("refuses an intact payload");
         decoded.clearRetainingCapacity();
@@ -348,4 +352,156 @@ test "zlib encodes, pmdeflate decodes" {
 
 test "corrupted payloads are refused or bounded" {
     try hegel.run(.{ .key = "corrupted-payloads" }, {}, corruptedPayloads);
+}
+
+/// writes DEFLATE bits least-significant first, as RFC 1951 packs them
+const BitWriter = struct {
+    bytes: std.ArrayList(u8) = .empty,
+    acc: u64 = 0,
+    count: u6 = 0,
+
+    fn put(self: *BitWriter, value: u32, n: u6) !void {
+        self.acc |= @as(u64, value) << self.count;
+        self.count += n;
+        while (self.count >= 8) {
+            try self.bytes.append(gpa, @truncate(self.acc));
+            self.acc >>= 8;
+            self.count -= 8;
+        }
+    }
+
+    /// Huffman codes are packed starting from their most significant bit
+    fn putCode(self: *BitWriter, code: u32, len: u6) !void {
+        const reversed = @bitReverse(@as(u16, @intCast(code))) >> @intCast(16 - @as(u7, len));
+        try self.put(reversed, len);
+    }
+
+    fn finish(self: *BitWriter) !void {
+        if (self.count > 0) try self.put(0, 8 - (self.count % 8));
+    }
+};
+
+const Header = enum { valid, incomplete, oversubscribed, no_end_of_block, too_many_lengths, too_many_distances, stored, stored_bad_nlen };
+
+/// canonical Huffman codes (RFC 1951 3.2.2) for `lengths`
+fn canonicalCodes(lengths: []const u8, codes: []u32) void {
+    var counts: [16]u32 = @splat(0);
+    for (lengths) |len| counts[len] += 1;
+    counts[0] = 0;
+    var next: [16]u32 = undefined;
+    var code: u32 = 0;
+    for (1..16) |bits| {
+        code = (code + counts[bits - 1]) << 1;
+        next[bits] = code;
+    }
+    for (lengths, 0..) |len, symbol| {
+        if (len == 0) continue;
+        codes[symbol] = next[len];
+        next[len] += 1;
+    }
+}
+
+/// a block built from RFC 1951 rather than by an encoder: a dynamic
+/// Huffman block that is valid or has one table defect, or a stored block
+/// with a good or broken NLEN. the data is coded with the block's own
+/// tables, so only the defect can make a decoder refuse it. pmdeflate and
+/// zlib must agree on whether it decodes, and on the message when it does.
+fn generatedBlocks(_: void, case: *hegel.TestCase) !void {
+    const header: Header = @fromBackingInt(@intCast(try case.index(std.meta.tags(Header).len)));
+    case.note("{t}", .{header});
+
+    var w: BitWriter = .{};
+    defer w.bytes.deinit(gpa);
+    var message: [24]u8 = undefined;
+    var message_len: usize = 0;
+
+    if (header == .stored or header == .stored_bad_nlen) {
+        message_len = try case.int(usize, 0, message.len);
+        for (message[0..message_len]) |*byte| byte.* = try case.int(u8, 0, 255);
+        try w.put(0, 3); // not final, stored
+        try w.finish();
+        const len: u16 = @intCast(message_len);
+        var nlen: u16 = ~len;
+        if (header == .stored_bad_nlen) nlen ^= @as(u16, 1) << @intCast(try case.int(u4, 0, 15));
+        try w.put(len, 16);
+        try w.put(nlen, 16);
+        for (message[0..message_len]) |byte| try w.put(byte, 8);
+    } else {
+        // literal/length lengths: 0..254 take 8 bits, 255 and end-of-block
+        // 9, a complete code. the defect variants change one thing.
+        var lengths: [288 + 32]u8 = @splat(0);
+        @memset(lengths[0..255], 8);
+        lengths[255] = 9;
+        lengths[256] = 9;
+        var nlen: u32 = 257;
+        switch (header) {
+            .incomplete => lengths[try case.int(usize, 0, 254)] = 0,
+            .oversubscribed => lengths[255] = 8,
+            .no_end_of_block => {
+                lengths[255] = 8;
+                lengths[256] = 0;
+            },
+            .too_many_lengths => nlen = try case.int(u32, 287, 288),
+            else => {},
+        }
+        // distances: one one-bit code (incomplete, which RFC 1951 decoders
+        // allow for a single code) or two
+        var ndist: u32 = try case.int(u32, 1, 2);
+        if (header == .too_many_distances) ndist = try case.int(u32, 31, 32);
+        for (0..@min(ndist, 2)) |d| lengths[nlen + d] = 1;
+
+        try w.put(0, 1); // not final
+        try w.put(2, 2); // dynamic Huffman
+        try w.put(nlen - 257, 5);
+        try w.put(ndist - 1, 5);
+        try w.put(19 - 4, 4);
+        // code-length code: symbols 0..15 at four bits each, a complete code
+        const order = [19]u8{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+        for (order) |symbol| try w.put(if (symbol < 16) 4 else 0, 3);
+        for (lengths[0 .. nlen + ndist]) |len| try w.putCode(len, 4);
+
+        var codes: [288]u32 = @splat(0);
+        canonicalCodes(lengths[0..nlen], codes[0..nlen]);
+        const count = try case.int(usize, 0, message.len);
+        for (0..count) |_| {
+            const byte = try case.int(u8, 0, 254);
+            if (lengths[byte] == 0) continue;
+            message[message_len] = byte;
+            message_len += 1;
+            try w.putCode(codes[byte], @intCast(lengths[byte]));
+        }
+        if (lengths[256] != 0) try w.putCode(codes[256], @intCast(lengths[256]));
+    }
+    try w.put(0, 3); // the empty stored block the receiver's tail completes
+    try w.finish();
+
+    const inflater = try pmdeflate.Inflater.create(gpa, .{});
+    defer inflater.destroy();
+    const oracle = try zlib.Inflater.create(gpa, true);
+    defer oracle.destroy(gpa);
+    var decoded: std.Io.Writer.Allocating = .init(gpa);
+    defer decoded.deinit();
+    var oracle_out: std.ArrayList(u8) = .empty;
+    defer oracle_out.deinit(gpa);
+
+    const zlib_ok = if (oracle.decompress(gpa, w.bytes.items, &oracle_out)) true else |_| false;
+    const ours = inflater.decompress(w.bytes.items, &decoded.writer, 1 << 16);
+    const sound = header == .valid or header == .stored;
+    if (sound and !zlib_ok) return case.fail("zlib refuses a valid generated block");
+    if (ours) |_| {
+        case.event("pmdeflate accepted the block");
+        if (!zlib_ok) return case.fail("pmdeflate accepts a block zlib refuses");
+        if (!std.mem.eql(u8, oracle_out.items, decoded.written()))
+            return case.fail("pmdeflate and zlib accept a block but disagree on its message");
+        if (sound and !std.mem.eql(u8, message[0..message_len], decoded.written()))
+            return case.fail("a valid block decodes to the wrong message");
+    } else |err| {
+        case.event("pmdeflate refused the block");
+        case.note("pmdeflate: {t}", .{err});
+        if (zlib_ok) return case.fail("pmdeflate refuses a block zlib accepts");
+    }
+}
+
+test "generated blocks decode exactly when zlib's do" {
+    try hegel.run(.{ .key = "generated-blocks" }, {}, generatedBlocks);
 }

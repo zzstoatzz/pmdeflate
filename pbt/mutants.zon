@@ -1,9 +1,9 @@
 .{
     .{
         .name = "finding: a refused message writes one byte past max_len",
-        .file = "src/root.zig",
-        .old = "produced += decoder.reader.stream(out, .limited(room))",
-        .new = "produced += decoder.reader.stream(out, .limited(room + 1))",
+        .file = "src/inflate.zig",
+        .old = "if (length > out.room()) return error.MessageTooLarge;",
+        .new = "if (length > out.room() + 1) return error.MessageTooLarge;",
     },
     .{
         .name = "deflater keeps its window with context takeover off",
@@ -12,10 +12,10 @@
         .new = "if (false) try self.restart();",
     },
     .{
-        .name = "inflater drops the window once it fills",
+        .name = "inflater keeps one byte less than the window",
         .file = "src/root.zig",
-        .old = "self.window_used = decoder.reader.end;",
-        .new = "self.window_used = if (decoder.reader.end >= window_len) 0 else decoder.reader.end;",
+        .old = "const keep = @min(decoded.len, window_len);",
+        .new = "const keep = @min(decoded.len, window_len - 1);",
     },
     .{
         .name = "inflater is not poisoned after an error",
@@ -25,14 +25,32 @@
     },
     .{
         .name = "inflater stops after the first BFINAL block",
-        .file = "src/root.zig",
-        .old = "while (in.bufferedLen() > 0) {",
+        .file = "src/inflate.zig",
+        .old = "while (bits.pos < input.len) {",
         .new = "for (0..1) |_| {",
     },
     .{
-        .name = "inflater accepts a message one byte over the limit",
-        .file = "src/root.zig",
-        .old = "if (more > 0) return error.MessageTooLarge;",
-        .new = "if (more > 1) return error.MessageTooLarge;",
+        .name = "inflater writes a literal past the limit",
+        .file = "src/inflate.zig",
+        .old = "if (out.buf.items.len >= end) return error.MessageTooLarge;",
+        .new = "if (out.buf.items.len > end) return error.MessageTooLarge;",
+    },
+    .{
+        .name = "incomplete code tables are accepted",
+        .file = "src/inflate.zig",
+        .old = "if (left > 0 and (codelen_table or max != 1)) return error.InvalidData;",
+        .new = "if (left > 0 and codelen_table) return error.InvalidData;",
+    },
+    .{
+        .name = "a stored block's NLEN is not checked",
+        .file = "src/inflate.zig",
+        .old = "if (len != ~nlen) return error.InvalidData;",
+        .new = "if (len != ~nlen and false) return error.InvalidData;",
+    },
+    .{
+        .name = "287 and 288 length symbols or 31 and 32 distance symbols are accepted",
+        .file = "src/inflate.zig",
+        .old = "if (nlen > 286 or ndist > 30) return error.InvalidData;",
+        .new = "if (nlen > 288 or ndist > 32) return error.InvalidData;",
     },
 }
