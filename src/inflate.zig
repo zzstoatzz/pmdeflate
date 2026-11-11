@@ -420,8 +420,14 @@ noinline fn huffmanSlowDistance(bits: *Bits, out: *Output, dist: *const Dist, le
 inline fn copyMatch(ptr: [*]u8, at: usize, distance: usize, length: usize) void {
     const dst = ptr + at;
     const src = dst - distance;
-    if (distance >= 8) {
-        // each word read lies wholly before the bytes this copy writes next
+    if (distance >= 16) {
+        // each chunk read lies wholly before the bytes this copy writes next
+        var i: usize = 0;
+        while (i < length) : (i += 16) {
+            const chunk: @Vector(16, u8) = @as(*align(1) const [16]u8, @ptrCast(src + i)).*;
+            @as(*align(1) [16]u8, @ptrCast(dst + i)).* = chunk;
+        }
+    } else if (distance >= 8) {
         var i: usize = 0;
         while (i < length) : (i += 8) {
             const word: u64 = @as(*align(1) const u64, @ptrCast(src + i)).*;
@@ -432,7 +438,14 @@ inline fn copyMatch(ptr: [*]u8, at: usize, distance: usize, length: usize) void 
         var i: usize = 0;
         while (i < length) : (i += 8) @as(*align(1) u64, @ptrCast(dst + i)).* = word;
     } else {
-        for (0..length) |k| dst[k] = src[k];
+        // the last `distance` bytes repeat: spell 8 bytes of the pattern, then
+        // write it in steps of the largest multiple of `distance` that fits
+        var pattern: [8]u8 = undefined;
+        for (0..8) |k| pattern[k] = src[k % distance];
+        const word: u64 = @bitCast(pattern);
+        const step = 8 - 8 % distance;
+        var i: usize = 0;
+        while (i < length) : (i += step) @as(*align(1) u64, @ptrCast(dst + i)).* = word;
     }
 }
 
