@@ -312,12 +312,13 @@ fn stored(gpa: Allocator, bits: *Bits, out: *Output) Error!void {
 /// bytes a match copy may write past its end: copies move whole 8-byte words
 const copy_slack = 16;
 
-/// decodes symbols while every check below holds for a whole symbol: the next
-/// word of input is in the payload, a 258-byte match fits under the limit, and
-/// the output has room for it plus `copy_slack`. 56 buffered bits cover a
-/// literal/length code, its extra bits, a distance code and its extra bits, so
-/// one branchless refill per symbol is enough. returns true at end of block,
-/// false when the careful path must take the next symbol.
+/// decodes symbols while the next word of input is in the payload and the
+/// output has room for an iteration's writes plus `copy_slack`. 56 buffered
+/// bits cover a literal/length code, its extra bits, a distance code and its
+/// extra bits, so one branchless refill per iteration is enough. the message
+/// limit is checked per symbol before its bits are consumed, so a symbol that
+/// would pass it is left for the careful path, which reports it. returns true
+/// at end of block, false when the careful path must take the next symbol.
 fn huffmanFast(bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Dist, end: usize) error{InvalidData}!bool {
     const in = bits.payload;
     var pos = bits.pos;
@@ -328,7 +329,7 @@ fn huffmanFast(bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Di
     const cap = out.buf.capacity;
     // one iteration writes at most two literals and a match
     const most = 2 + max_match;
-    const result: bool = while (pos + 16 <= in.len and cap - len >= most + copy_slack and end -| len >= most) {
+    const result: bool = while (pos + 8 <= in.len and cap - len >= most + copy_slack) {
         buf |= std.mem.readInt(u64, in[pos..][0..8], .little) << @intCast(count);
         pos += (63 - @as(usize, count)) >> 3;
         count |= 56;
@@ -338,7 +339,7 @@ fn huffmanFast(bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Di
         // 36 bits remain: a length code and its extra bits (15) and a distance
         // code and its extra bits (21)
         inline for (0..2) |_| {
-            if (entry >> 16 != 0 and @as(u16, @truncate(entry)) < 256) {
+            if (entry >> 16 != 0 and @as(u16, @truncate(entry)) < 256 and len < end) {
                 const lit_len: u6 = @intCast(entry >> 16);
                 buf >>= lit_len;
                 count -= lit_len;
@@ -349,19 +350,27 @@ fn huffmanFast(bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Di
         }
         const code_len: u6 = @intCast(entry >> 16);
         if (code_len == 0) break false;
-        buf >>= code_len;
-        count -= code_len;
         const symbol: u16 = @truncate(entry);
         if (symbol < 256) {
+            if (len >= end) break false;
+            buf >>= code_len;
+            count -= code_len;
             ptr[len] = @intCast(symbol);
             len += 1;
             continue;
         }
-        if (symbol == 256) break true;
+        if (symbol == 256) {
+            buf >>= code_len;
+            count -= code_len;
+            break true;
+        }
         const li = symbol - 257;
         if (li >= length_base.len) return error.InvalidData;
         const length_bits = length_extra[li];
-        const length: usize = length_base[li] + @as(usize, @intCast(buf & ((@as(u64, 1) << length_bits) - 1)));
+        const length: usize = length_base[li] + @as(usize, @intCast((buf >> code_len) & ((@as(u64, 1) << length_bits) - 1)));
+        if (length > end -| len) break false;
+        buf >>= code_len;
+        count -= code_len;
         buf >>= length_bits;
         count -= length_bits;
 
