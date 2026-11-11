@@ -76,3 +76,21 @@ test "a refused large payload leaves no payload-sized buffer behind" {
     try t.expect(counting.live <= idle_bound);
 }
 
+test "reset returns what a large message that failed grew" {
+    const payload = try storedPayload(t.allocator, 4 << 20);
+    defer t.allocator.free(payload);
+    var counting: Counting = .{ .child = t.allocator };
+    const inflater = try pmdeflate.Inflater.create(counting.allocator(), .{ .context_takeover = false });
+    defer inflater.destroy();
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+    // the last byte missing: the message decodes almost entirely, then fails
+    try t.expectError(error.InvalidData, inflater.decompress(payload[0 .. payload.len - 1], &out.writer, 8 << 20));
+    inflater.reset();
+    for (0..100) |_| {
+        out.clearRetainingCapacity();
+        _ = try inflater.decompress("\x00", &out.writer, 16);
+    }
+    try t.expect(counting.live <= idle_bound);
+}
+
