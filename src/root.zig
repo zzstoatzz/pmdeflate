@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const flate = std.compress.flate;
+const inflate = @import("inflate.zig");
 const Allocator = std.mem.Allocator;
 
 /// the LZ77 window both ends keep under context takeover (2^15 bytes)
@@ -112,11 +113,9 @@ pub const Deflater = struct {
 pub const Inflater = struct {
     gpa: Allocator,
     options: Options,
-    /// the decoder's buffer. `scratch[0..window_used]` is output already
-    /// decoded, kept in place as the next message's window; std moves it
-    /// down when the buffer fills, keeping the last `window_len` bytes.
-    scratch: []u8,
-    window_used: usize = 0,
+    decoder: *inflate.Decoder,
+    /// the window from earlier messages, then the message being decoded
+    output: inflate.Output = .{},
     /// payload plus the appended tails, reused between messages
     input: std.ArrayList(u8) = .empty,
     failed: bool = false,
@@ -136,24 +135,29 @@ pub const Inflater = struct {
         Failed,
     };
 
+    /// past this, the output buffer gives memory back after a message
+    const retained_capacity = 256 * 1024;
+
     pub fn create(gpa: Allocator, options: Options) Allocator.Error!*Inflater {
         const self = try gpa.create(Inflater);
         errdefer gpa.destroy(self);
-        const scratch = try gpa.alloc(u8, flate.max_window_len);
-        self.* = .{ .gpa = gpa, .options = options, .scratch = scratch };
+        const decoder = try gpa.create(inflate.Decoder);
+        decoder.init();
+        self.* = .{ .gpa = gpa, .options = options, .decoder = decoder };
         return self;
     }
 
     pub fn destroy(self: *Inflater) void {
         const gpa = self.gpa;
         self.input.deinit(gpa);
-        gpa.free(self.scratch);
+        self.output.buf.deinit(gpa);
+        gpa.destroy(self.decoder);
         gpa.destroy(self);
     }
 
     /// forget the window and any earlier failure
     pub fn reset(self: *Inflater) void {
-        self.window_used = 0;
+        self.output.buf.clearRetainingCapacity();
         self.failed = false;
     }
 
@@ -163,7 +167,7 @@ pub const Inflater = struct {
     pub fn decompress(self: *Inflater, payload: []const u8, out: *std.Io.Writer, max_len: usize) Error!usize {
         if (self.failed) return error.Failed;
         self.failed = true;
-        if (!self.options.context_takeover) self.window_used = 0;
+        if (!self.options.context_takeover) self.output.buf.clearRetainingCapacity();
 
         // RFC 7692 7.2.2: append the sync-flush tail. then end the stream
         // with a final empty stored block, so the decoder finishes instead of
@@ -174,49 +178,27 @@ pub const Inflater = struct {
         self.input.appendSliceAssumeCapacity(payload);
         self.input.appendSliceAssumeCapacity(tail);
 
-        var in: std.Io.Reader = .fixed(self.input.items);
-        var produced: usize = 0;
+        const output = &self.output;
+        output.window_end = output.buf.items.len;
+        output.limit = max_len;
         // a payload may hold blocks with BFINAL set (RFC 7692 7.2.3.4); each
         // ends a DEFLATE stream, and the next continues with the same window
-        while (in.bufferedLen() > 0) {
-            var decoder: flate.Decompress = .init(&in, .raw, self.scratch);
-            decoder.reader.seek = self.window_used;
-            decoder.reader.end = self.window_used;
-            while (true) {
-                const room = max_len -| produced;
-                if (room == 0) {
-                    // full: one more byte of output means the message is
-                    // too large. decode it into a probe, never into `out`.
-                    var probe_buf: [1]u8 = undefined;
-                    var probe: std.Io.Writer = .fixed(&probe_buf);
-                    const more = decoder.reader.stream(&probe, .limited(1)) catch |err| switch (err) {
-                        error.EndOfStream => break,
-                        error.ReadFailed => return invalid(&decoder),
-                        error.WriteFailed => unreachable, // the probe has room for the one byte
-                    };
-                    if (more > 0) return error.MessageTooLarge;
-                    continue;
-                }
-                produced += decoder.reader.stream(out, .limited(room)) catch |err| switch (err) {
-                    error.EndOfStream => break,
-                    error.ReadFailed => return invalid(&decoder),
-                    error.WriteFailed => return error.WriteFailed,
-                };
-            }
-            self.window_used = decoder.reader.end;
-        }
-        self.failed = false;
-        return produced;
-    }
+        try self.decoder.decodeAll(self.gpa, self.input.items, output);
+        const message = output.buf.items[output.window_end..];
+        try out.writeAll(message);
 
-    fn invalid(decoder: *const flate.Decompress) Error {
-        return switch (decoder.err.?) {
-            error.ReadFailed => unreachable, // input is a fixed buffer
-            else => error.InvalidData,
-        };
+        // keep the last window at the front for the next message
+        const decoded = output.buf.items;
+        const keep = @min(decoded.len, window_len);
+        std.mem.copyForwards(u8, decoded[0..keep], decoded[decoded.len - keep ..]);
+        output.buf.shrinkRetainingCapacity(keep);
+        if (output.buf.capacity > retained_capacity) output.buf.shrinkAndFree(self.gpa, keep);
+        self.failed = false;
+        return message.len;
     }
 };
 
 test {
     _ = @import("rfc7692_test.zig");
+    _ = @import("inflate.zig");
 }
