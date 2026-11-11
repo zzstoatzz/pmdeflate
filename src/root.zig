@@ -135,7 +135,9 @@ pub const Inflater = struct {
         Failed,
     };
 
-    /// past this, the output buffer gives memory back after a message
+    /// history kept before the window is moved to the front
+    const compact_at = 128 * 1024;
+    /// past this, compaction also gives memory back
     const retained_capacity = 256 * 1024;
 
     pub fn create(gpa: Allocator, options: Options) Allocator.Error!*Inflater {
@@ -187,12 +189,16 @@ pub const Inflater = struct {
         const message = output.buf.items[output.window_end..];
         try out.writeAll(message);
 
-        // keep the last window at the front for the next message
+        // the history stays in place for the next message. once it passes
+        // `compact_at`, only the last window moves to the front, so small
+        // messages do not each pay for moving 32 KiB
         const decoded = output.buf.items;
-        const keep = @min(decoded.len, window_len);
-        std.mem.copyForwards(u8, decoded[0..keep], decoded[decoded.len - keep ..]);
-        output.buf.shrinkRetainingCapacity(keep);
-        if (output.buf.capacity > retained_capacity) output.buf.shrinkAndFree(self.gpa, keep);
+        if (decoded.len > compact_at) {
+            const keep = @min(decoded.len, window_len);
+            std.mem.copyForwards(u8, decoded[0..keep], decoded[decoded.len - keep ..]);
+            output.buf.shrinkRetainingCapacity(keep);
+            if (output.buf.capacity > retained_capacity) output.buf.shrinkAndFree(self.gpa, keep);
+        }
         self.failed = false;
         return message.len;
     }
