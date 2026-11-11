@@ -15,7 +15,7 @@ const gpa = std.testing.allocator;
 /// the largest message a case may draw; past 2 windows and the 64 KiB buffers
 const max_message = 80 * 1024;
 
-const Shape = enum { json, run, noise, text, repeat, empty, window_edge };
+const Shape = enum { json, run, noise, text, repeat, empty, window_edge, periodic };
 
 /// copy `out.len` bytes starting `back` bytes before the end of the history
 /// (the messages concatenated); false when the history is shorter
@@ -80,6 +80,17 @@ fn drawMessage(case: *hegel.TestCase, buf: []u8, history: []const []const u8) ![
             @memcpy(buf[0..earlier.len], earlier);
             if (earlier.len > 0 and try case.boolean()) buf[try case.index(earlier.len)] ^= 0x20;
             return buf[0..earlier.len];
+        },
+        .periodic => {
+            // a run repeating every 2 to 40 bytes: matches at short distances,
+            // which the decoder copies by pattern, word or 16-byte chunk
+            const period = try case.int(usize, 2, 40);
+            const seed = try case.int(u32, 0, std.math.maxInt(u32));
+            var prng: std.Random.DefaultPrng = .init(seed);
+            var unit: [40]u8 = undefined;
+            prng.random().bytes(&unit);
+            for (buf[0..len], 0..) |*b, k| b.* = unit[k % period];
+            return buf[0..len];
         },
         .window_edge => {
             // bytes from exactly one window back. over unique content, the
@@ -247,7 +258,7 @@ fn zlibEncodes(_: void, case: *hegel.TestCase) !void {
     }
 }
 
-const Corruption = enum { none, flip_bit, truncate, append, splice_noise, replace };
+const Corruption = enum { none, flip_bit, truncate, append, splice_noise, replace, pad_empty_blocks };
 
 /// a corrupted payload is refused or decoded within the limit; never a crash.
 /// when both decoders accept it, they agree. an inflater that refused a
@@ -302,15 +313,23 @@ fn corruptedPayloads(_: void, case: *hegel.TestCase) !void {
             corrupt.clearRetainingCapacity();
             try corrupt.appendSlice(gpa, try case.bytes(&noise, 0, noise.len));
         },
+        // not a corruption: complete the sync flush's empty stored block and
+        // send more of them, which RFC 7692 allows. the message's last symbols
+        // then sit far enough from the payload's end for the decoder's fast
+        // loop to decode them, so a limit check missing there shows
+        .pad_empty_blocks => for (0..try case.int(usize, 2, 4)) |_| try corrupt.appendSlice(gpa, "\x00\x00\xff\xff\x00"),
     }
     case.note("{t} -> {d} payload bytes", .{ how, corrupt.items.len });
 
-    // limits around the message length are where an off-by-one hides
-    const limit = switch (try case.index(5)) {
+    // limits around the message length are where an off-by-one hides. a limit
+    // inside the message stops it while the decoder's fast loop is running,
+    // which the last few bytes of a payload never reach
+    const limit = switch (try case.index(6)) {
         0 => message.len -| 1,
         1 => message.len,
         2 => message.len -| try case.int(usize, 2, 3),
         3 => message.len + try case.int(usize, 1, 2),
+        4 => try case.int(usize, 0, message.len -| 1),
         else => try case.int(usize, 0, max_message),
     };
     decoded.clearRetainingCapacity();
@@ -381,7 +400,7 @@ const BitWriter = struct {
     }
 };
 
-const Header = enum { valid, incomplete, oversubscribed, no_end_of_block, too_many_lengths, too_many_distances, stored, stored_bad_nlen, stored_short };
+const Header = enum { valid, incomplete, oversubscribed, no_end_of_block, too_many_lengths, too_many_distances, stored, stored_bad_nlen, stored_short, far_match };
 
 /// canonical Huffman codes (RFC 1951 3.2.2) for `lengths`
 fn canonicalCodes(lengths: []const u8, codes: []u32) void {
@@ -415,7 +434,29 @@ fn generatedBlocks(_: void, case: *hegel.TestCase) !void {
     var message: [24]u8 = undefined;
     var message_len: usize = 0;
 
-    if (header == .stored or header == .stored_bad_nlen or header == .stored_short) {
+    if (header == .far_match) {
+        // fixed Huffman literals, then a match exactly as far back as the
+        // history reaches or one byte further, then more literals so the
+        // decoder's fast loop, which stops 8 bytes before the end of the
+        // payload, is the one that meets the match
+        const dist_base = [30]u16{ 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+        const dist_extra = [30]u4{ 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+        try w.put(0, 1); // not final
+        try w.put(1, 2); // fixed Huffman
+        message_len = try case.int(usize, 1, 16);
+        for (message[0..message_len]) |*byte| {
+            byte.* = try case.int(u8, 0, 143);
+            try w.putCode(0x30 + @as(u32, byte.*), 8);
+        }
+        const distance = message_len + try case.int(usize, 0, 1);
+        var ds: usize = 0;
+        while (ds + 1 < dist_base.len and dist_base[ds + 1] <= distance) ds += 1;
+        try w.putCode(1, 7); // length 3
+        try w.putCode(@intCast(ds), 5);
+        try w.put(@intCast(distance - dist_base[ds]), dist_extra[ds]);
+        for (0..12) |_| try w.putCode(0x30 + @as(u32, try case.int(u8, 0, 143)), 8);
+        try w.putCode(0, 7); // end of block
+    } else if (header == .stored or header == .stored_bad_nlen or header == .stored_short) {
         message_len = try case.int(usize, 0, message.len);
         for (message[0..message_len]) |*byte| byte.* = try case.int(u8, 0, 255);
         // a short block claims more bytes than it carries, reaching into the
