@@ -46,6 +46,10 @@ pub fn build(b: *std.Build) void {
         targets_step.dependOn(&lib.step);
     }
 
+    // the rest are this repository's own steps. as a dependency, setting them
+    // up would make every consumer fetch zlib and hegel.
+    if (!b.isRoot()) return;
+
     // zlib is the reference implementation for differential tests and the
     // baseline for benchmarks. only those steps fetch and compile it.
     const differential_step = b.step("differential", "round-trip against zlib in both directions");
