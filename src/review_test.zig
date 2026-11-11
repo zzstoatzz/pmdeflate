@@ -94,3 +94,29 @@ test "reset returns what a large message that failed grew" {
     try t.expect(counting.live <= idle_bound);
 }
 
+test "trim gives back a deflater's grown buffer and keeps its window" {
+    var counting: Counting = .{ .child = t.allocator };
+    const deflater = try pmdeflate.Deflater.create(counting.allocator(), .{});
+    defer deflater.destroy();
+    const inflater = try pmdeflate.Inflater.create(t.allocator, .{});
+    defer inflater.destroy();
+    var out: std.Io.Writer.Allocating = .init(t.allocator);
+    defer out.deinit();
+
+    const large = try t.allocator.alloc(u8, 4 << 20);
+    defer t.allocator.free(large);
+    var prng: std.Random.DefaultPrng = .init(9);
+    prng.random().bytes(large);
+    _ = try inflater.decompress(try deflater.compress(large), &out.writer, 8 << 20);
+    try deflater.trim();
+    try t.expect(counting.live <= idle_bound);
+
+    // 300 random bytes from the end of the last message compress to a short
+    // back-reference only if the window survived; without it, to ~300 bytes
+    const repeat = large[large.len - 300 ..];
+    const payload = try deflater.compress(repeat);
+    try t.expect(payload.len < 32);
+    out.clearRetainingCapacity();
+    _ = try inflater.decompress(payload, &out.writer, 8 << 20);
+    try t.expectEqualSlices(u8, repeat, out.written());
+}

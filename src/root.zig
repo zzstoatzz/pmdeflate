@@ -65,6 +65,21 @@ pub const Deflater = struct {
         gpa.destroy(self);
     }
 
+    /// give back the payload buffer a large message grew, keeping the window.
+    /// call it between messages when per-connection memory matters more than
+    /// reallocating for the next large message.
+    pub fn trim(self: *Deflater) Error!void {
+        if (self.out.writer.buffer.len <= retained_capacity) return;
+        // the compressor holds the writer's address, which does not move, and
+        // after a sync flush it has no bits buffered in it
+        const fresh: std.Io.Writer.Allocating = try .initCapacity(self.gpa, 16 * 1024);
+        self.out.deinit();
+        self.out = fresh;
+    }
+
+    /// payload buffer capacity `trim` keeps
+    const retained_capacity = 256 * 1024;
+
     /// forget the window, as if no message had been compressed
     pub fn reset(self: *Deflater) Error!void {
         try self.restart();
