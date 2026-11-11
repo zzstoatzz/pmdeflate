@@ -53,4 +53,10 @@
         .old = "if (nlen > 286 or ndist > 30) return error.InvalidData;",
         .new = "if (nlen > 288 or ndist > 32) return error.InvalidData;",
     },
+    .{
+        .name = "input left over at the end of a payload is accepted",
+        .file = "src/inflate.zig",
+        .old = "return self.count == 0 and self.pos == self.size();",
+        .new = "return self.pos == self.size();",
+    },
 }
