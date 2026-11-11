@@ -309,11 +309,133 @@ fn stored(gpa: Allocator, bits: *Bits, out: *Output) Error!void {
     bits.pos += len;
 }
 
+/// bytes a match copy may write past its end: copies move whole 8-byte words
+const copy_slack = 16;
+
+/// decodes symbols while every check below holds for a whole symbol: the next
+/// word of input is in the payload, a 258-byte match fits under the limit, and
+/// the output has room for it plus `copy_slack`. 56 buffered bits cover a
+/// literal/length code, its extra bits, a distance code and its extra bits, so
+/// one branchless refill per symbol is enough. returns true at end of block,
+/// false when the careful path must take the next symbol.
+fn huffmanFast(bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Dist, end: usize) error{InvalidData}!bool {
+    const in = bits.payload;
+    var pos = bits.pos;
+    var buf = bits.buf;
+    var count = bits.count;
+    const ptr = out.buf.items.ptr;
+    var len = out.buf.items.len;
+    const cap = out.buf.capacity;
+    // one iteration writes at most two literals and a match
+    const most = 2 + max_match;
+    const result: bool = while (pos + 16 <= in.len and cap - len >= most + copy_slack and end -| len >= most) {
+        buf |= std.mem.readInt(u64, in[pos..][0..8], .little) << @intCast(count);
+        pos += (63 - @as(usize, count)) >> 3;
+        count |= 56;
+
+        var entry = litlen.fast[@intCast(buf & (litlen.fast.len - 1))];
+        // up to two literals before the general case. after two 10-bit codes,
+        // 36 bits remain: a length code and its extra bits (15) and a distance
+        // code and its extra bits (21)
+        inline for (0..2) |_| {
+            if (entry >> 16 != 0 and @as(u16, @truncate(entry)) < 256) {
+                const lit_len: u6 = @intCast(entry >> 16);
+                buf >>= lit_len;
+                count -= lit_len;
+                ptr[len] = @truncate(entry);
+                len += 1;
+                entry = litlen.fast[@intCast(buf & (litlen.fast.len - 1))];
+            }
+        }
+        const code_len: u6 = @intCast(entry >> 16);
+        if (code_len == 0) break false;
+        buf >>= code_len;
+        count -= code_len;
+        const symbol: u16 = @truncate(entry);
+        if (symbol < 256) {
+            ptr[len] = @intCast(symbol);
+            len += 1;
+            continue;
+        }
+        if (symbol == 256) break true;
+        const li = symbol - 257;
+        if (li >= length_base.len) return error.InvalidData;
+        const length_bits = length_extra[li];
+        const length: usize = length_base[li] + @as(usize, @intCast(buf & ((@as(u64, 1) << length_bits) - 1)));
+        buf >>= length_bits;
+        count -= length_bits;
+
+        const dentry = dist.fast[@intCast(buf & (dist.fast.len - 1))];
+        const dcode_len: u6 = @intCast(dentry >> 16);
+        if (dcode_len == 0) {
+            // a distance code longer than the fast table: rare, so take the
+            // canonical decode through the struct
+            bits.* = .{ .payload = bits.payload, .tail = bits.tail, .pos = pos, .buf = buf, .count = count };
+            out.buf.items.len = len;
+            return huffmanSlowDistance(bits, out, dist, length);
+        }
+        buf >>= dcode_len;
+        count -= dcode_len;
+        const ds: u16 = @truncate(dentry);
+        if (ds >= dist_base.len) return error.InvalidData;
+        const dist_bits = dist_extra[ds];
+        const distance: usize = dist_base[ds] + @as(usize, @intCast(buf & ((@as(u64, 1) << dist_bits) - 1)));
+        buf >>= dist_bits;
+        count -= dist_bits;
+        if (distance > len) return error.InvalidData;
+        copyMatch(ptr, len, distance, length);
+        len += length;
+    } else false;
+    bits.pos = pos;
+    bits.buf = buf;
+    bits.count = count;
+    out.buf.items.len = len;
+    return result;
+}
+
+/// finishes a match whose distance code missed the fast table, then hands
+/// back to the caller's loop
+noinline fn huffmanSlowDistance(bits: *Bits, out: *Output, dist: *const Dist, length: usize) error{InvalidData}!bool {
+    const ds = try bits.decode(dist);
+    if (ds >= dist_base.len) return error.InvalidData;
+    const distance: usize = dist_base[ds] + try bits.bits(dist_extra[ds]);
+    const have = out.buf.items.len;
+    if (distance > have) return error.InvalidData;
+    copyMatch(out.buf.items.ptr, have, distance, length);
+    out.buf.items.len += length;
+    return false;
+}
+
+/// copies `length` bytes from `distance` back. may write up to `copy_slack`
+/// bytes past the end, which the caller has room for.
+inline fn copyMatch(ptr: [*]u8, at: usize, distance: usize, length: usize) void {
+    const dst = ptr + at;
+    const src = dst - distance;
+    if (distance >= 8) {
+        // each word read lies wholly before the bytes this copy writes next
+        var i: usize = 0;
+        while (i < length) : (i += 8) {
+            const word: u64 = @as(*align(1) const u64, @ptrCast(src + i)).*;
+            @as(*align(1) u64, @ptrCast(dst + i)).* = word;
+        }
+    } else if (distance == 1) {
+        const word: u64 = @as(u64, src[0]) * 0x0101010101010101;
+        var i: usize = 0;
+        while (i < length) : (i += 8) @as(*align(1) u64, @ptrCast(dst + i)).* = word;
+    } else {
+        for (0..length) |k| dst[k] = src[k];
+    }
+}
+
 fn huffman(gpa: Allocator, bits: *Bits, out: *Output, litlen: *const LitLen, dist: *const Dist) Error!void {
     // the message may not grow past this absolute length
     const end = std.math.add(usize, out.window_end, out.limit) catch std.math.maxInt(usize);
     while (true) {
-        if (out.buf.capacity - out.buf.items.len < max_match) try out.reserve(gpa, max_match);
+        if (out.buf.capacity - out.buf.items.len < 2 + max_match + copy_slack) try out.reserve(gpa, 2 + max_match + copy_slack);
+        if (try huffmanFast(bits, out, litlen, dist, end)) return;
+        // the fast loop may have stopped for want of room: the careful
+        // symbol below writes up to a whole match
+        if (out.buf.capacity - out.buf.items.len < 2 + max_match + copy_slack) try out.reserve(gpa, 2 + max_match + copy_slack);
         // 48 bits cover a code, length extra, distance code and distance extra
         if (bits.count < 48) bits.refill();
         const symbol = try bits.decode(litlen);
