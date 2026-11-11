@@ -1,6 +1,6 @@
 # pmdeflate
 
-permessage-deflate ([RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)) for WebSocket in pure Zig 0.17, on `std.compress.flate`. no C, no libc: it builds for Linux, macOS, Windows, FreeBSD, wasm32-freestanding and wasm32-wasi.
+permessage-deflate ([RFC 7692](https://www.rfc-editor.org/rfc/rfc7692)) for WebSocket in pure Zig 0.17: compression on `std.compress.flate`, decompression with its own table-driven inflater. no C, no libc: it builds for Linux, macOS, Windows, FreeBSD, wasm32-freestanding and wasm32-wasi.
 
 ```zig
 const pmdeflate = @import("pmdeflate");

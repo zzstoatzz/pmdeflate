@@ -22,7 +22,7 @@ generator changes. `HEGEL_ZIG_ECHO=1` prints the history before a panic.
 | --- | --- | --- |
 | Deflater | every payload decodes to the message in pmdeflate and zlib, levels 1–9, takeover on and off, resets, messages past the window and exactly one window back | allocation failure paths |
 | Inflater | zlib payloads at levels 1–9; payloads ending in or continuing past a BFINAL block; a window kept across messages and resets | payloads from encoders other than zlib and pmdeflate |
-| Malformed input | flipped bits, truncation, appended and spliced noise, replaced payloads: refused or bounded by the limit, agreement with zlib when both accept, poisoning after a refusal | dynamic-Huffman table corruption is reached only by chance |
+| Malformed input | flipped bits, truncation, appended and spliced noise, replaced payloads, and generated dynamic and stored blocks with one defect: zlib's exact accept/refuse decision and message, poisoning after a refusal | fixed-Huffman blocks only through encoders and corruption |
 | Limits | output never passes `max_len`; a message of exactly `max_len` is accepted | |
 
 The table describes what the campaign checks, not exhaustive coverage.

@@ -30,39 +30,53 @@ a takeover mode, then a generated history.
 |---|---|
 | pmdeflate encodes | pmdeflate and zlib both decode each payload to the message. resets clear both ends. payloads are sometimes rewritten as RFC 7692 7.2.3.4 allows: ending in a BFINAL block, or splitting the message across a BFINAL block. |
 | zlib encodes | pmdeflate decodes each payload to the message |
-| corrupted payloads | a flipped bit, truncation, appended or spliced noise, or a replaced payload is refused or decoded within the limit, never a crash. when both decoders accept it they agree. a refusal poisons the inflater until reset. |
+| payloads, corrupted or intact | a flipped bit, truncation, appended or spliced noise, a replaced payload, or none, with limits drawn around the message length: pmdeflate makes zlib's exact accept/refuse decision and, when both accept, produces the same message. nothing is written past the limit, and a refusal poisons the inflater until reset. |
+| generated blocks | blocks written from RFC 1951 rather than by an encoder: dynamic Huffman blocks that are valid or have one table defect (incomplete, oversubscribed, no end-of-block, too many length or distance symbols) and stored blocks with a good or broken NLEN, coded with their own tables. pmdeflate makes zlib's decision and a valid block decodes to its message. |
+
+the zlib oracle is adjusted in two places so that "zlib accepts" means what
+a WebSocket receiver means. at a BFINAL block zlib ends its stream; the
+oracle restarts with `inflateReset` and the last 32 KiB of output as a
+dictionary, as RFC 7692 7.2.3.4 continues with the same window. and zlib
+treats input that stops mid-block as waiting for more, so the oracle accepts
+a payload only when all of it is consumed at a block boundary or a stream
+ended there; otherwise an empty or truncated payload looked accepted.
 
 messages are drawn by shape and size bucket so the cases that matter are
-common. in a 1,000-case run of the encode property (`HEGEL_SEED=7`), 35% of
-cases hold a message longer than the window, 49% reference bytes exactly one
-window back, 59% carry message data after a BFINAL block, and 39% reset
-after a message; the corruption property refused 85% of its payloads.
+common: messages longer than the window, large messages that fill the
+inflater's history past where it compacts, references exactly one window
+back, repeats, and message data after a BFINAL block.
 
 ### calibration
 
 `zig build mutants` plants each entry of `pbt/mutants.zon` and runs the
-campaign under ten seeds at 300 cases. on 2026-11-10 every mutant was caught
-on 10 of 10 seeds and the unmutated baseline passed 10 of 10:
+campaign under ten seeds at 300 cases. on 2026-11-10, against the
+table-driven inflater, the unmutated baseline passed 10 of 10:
 
 | mutant | caught |
 |---|---|
-| finding: a refused message writes one byte past `max_len` | 10/10 |
+| finding: a refused message writes one byte past `max_len` | 9/10 |
 | deflater keeps its window with takeover off | 10/10 |
-| inflater drops the window once it fills | 10/10 |
+| inflater keeps one byte less than the window | 10/10 |
 | inflater is not poisoned after an error | 10/10 |
 | inflater stops after the first BFINAL block | 10/10 |
-| inflater accepts a message one byte over the limit | 10/10 |
+| inflater writes a literal past the limit | 10/10 |
+| incomplete code tables are accepted | 10/10 |
+| a stored block's NLEN is not checked | 10/10 |
+| 287 or 288 length symbols, or 31 or 32 distance symbols, are accepted | 10/10 |
 
-the first ten-seed run caught three of six. the over-limit mutant returned
-a truncated message and no property compared it with zlib's full length;
-the corruption property now draws intact payloads and limits around the
-message length, and requires a refusal whenever zlib decodes more than the
-limit. the finding mutant crashed on an integer underflow instead of
-failing a property; the remaining room now saturates, so the property sees
-the overrun. the window mutant could never fire, because std keeps exactly
-one window after a rebase, and was replaced by one that does. earlier,
-smaller runs showed the window-edge and split-BFINAL shapes turning
-surviving mutants into kills.
+what the earlier runs exposed, in order:
+
+- caught 3 of 6 against std's decoder: an over-limit mutant returned a
+  truncated message and no property compared it with zlib's full length; a
+  mutant crashed on an integer underflow instead of failing a property; a
+  window mutant used a condition std's rebase never reaches.
+- caught 6 of 10 against the new inflater: the header mutants survived
+  because random corruption rarely forms a valid dynamic header with one
+  defect, and the generated-block property did not exist yet. its first
+  version coded data with the valid table, so a defective table also broke
+  the data and both decoders refused for the wrong reason.
+- removed as equivalent: dropping the end-of-block check. a block without an
+  end-of-block code cannot end, so a whole payload is refused either way.
 
 ### findings
 
@@ -70,11 +84,18 @@ surviving mutants into kills.
   the corrupted-payload property on its first run; fixed, with a regression
   in `src/rfc7692_test.zig`.
 
+### Autobahn
+
+websocket.zig runs Autobahn TestSuite's 517 cases against echo servers with
+and without context takeover (`support/autobahn` on its
+`build/pmdeflate-codec` branch). with pmdeflate's std-based decoder,
+pmdeflate and zlib produced the same behavior on all 1,551 case results,
+with no failures; the declined cases are offers of `max_window_bits`
+below 15.
+
 ### gaps
 
-- no Autobahn run yet: framing, fragmentation and negotiation belong to the
-  WebSocket library that uses this codec.
-- zlib stops at a BFINAL block, so payloads that use one are checked by
-  pmdeflate's own decoding and the RFC examples, not by zlib.
 - the deflater cannot limit match distance, so `max_window_bits` below 15 is
   unsupported rather than tested.
+- the generated blocks cover dynamic and stored headers; fixed-Huffman
+  blocks are reached through the encoders and corruption only.
