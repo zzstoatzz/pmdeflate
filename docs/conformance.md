@@ -49,8 +49,9 @@ back, repeats, and message data after a BFINAL block.
 ### calibration
 
 `zig build mutants` plants each entry of `pbt/mutants.zon` and runs the
-campaign under ten seeds at 300 cases. on 2026-11-10, against the
-table-driven inflater, the unmutated baseline passed 10 of 10:
+campaign under ten seeds at 300 cases. on 2026-11-11, against the
+table-driven inflater reading payloads in place, the unmutated baseline
+passed 10 of 10:
 
 | mutant | caught |
 |---|---|
@@ -63,6 +64,7 @@ table-driven inflater, the unmutated baseline passed 10 of 10:
 | incomplete code tables are accepted | 10/10 |
 | a stored block's NLEN is not checked | 10/10 |
 | 287 or 288 length symbols, or 31 or 32 distance symbols, are accepted | 10/10 |
+| input left over at the end of a payload is accepted | 10/10 |
 
 what the earlier runs exposed, in order:
 
