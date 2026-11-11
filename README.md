@@ -21,7 +21,7 @@ turn `context_takeover` off for a direction when `client_no_context_takeover` or
 ## install
 
 ```sh
-zig fetch --save=pmdeflate https://tangled.org/zzstoatzz.io/pmdeflate/archive/main.tar.gz
+zig fetch --save=pmdeflate https://tangled.org/zzstoatzz.io/pmdeflate/archive/v0.1.0.tar.gz
 ```
 
 ```zig
@@ -38,8 +38,10 @@ zig build pbt           # hegel campaigns; HEGEL_TEST_CASES sets the budget
 zig build bench -- --frames path/to/frames.bin
 ```
 
-zlib and hegel are lazy dependencies used only by the test and bench steps. everything runs offline once they are fetched. [docs/conformance.md](docs/conformance.md) covers what is tested and how the campaign was calibrated; [docs/bench.md](docs/bench.md) has measurements against zlib.
+zlib and hegel are lazy dependencies of the test and bench steps, fetched only when pmdeflate is the root build, so consumers never download them. everything runs offline once they are fetched. [docs/conformance.md](docs/conformance.md) covers what is tested and how the campaign was calibrated; [docs/bench.md](docs/bench.md) has measurements against zlib.
 
 ## license
 
 MIT
+
+[changelog](CHANGELOG.md)
