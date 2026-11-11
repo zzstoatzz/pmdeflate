@@ -59,4 +59,40 @@
         .old = "return self.count == 0 and self.pos == self.size();",
         .new = "return self.pos == self.size();",
     },
+    .{
+        .name = "fast path: unrolled literals ignore the limit",
+        .file = "src/inflate.zig",
+        .old = "and len < end) {",
+        .new = ") {",
+    },
+    .{
+        .name = "fast path: a literal ignores the limit",
+        .file = "src/inflate.zig",
+        .old = "if (len >= end) break false;",
+        .new = "if (false) break false;",
+    },
+    .{
+        .name = "fast path: a match ignores the limit",
+        .file = "src/inflate.zig",
+        .old = "if (length > end -| len) break false;",
+        .new = "if (false) break false;",
+    },
+    .{
+        .name = "fast path: a distance past the history is accepted",
+        .file = "src/inflate.zig",
+        .old = "if (distance > len) return error.InvalidData;",
+        .new = "if (false) return error.InvalidData;",
+    },
+    .{
+        .name = "fast path: a short-distance pattern steps a whole word",
+        .file = "src/inflate.zig",
+        .old = "const step = 8 - 8 % distance;",
+        .new = "const step = 8;",
+    },
+    .{
+        .name = "fast path: 16-byte copies overlap their source",
+        .file = "src/inflate.zig",
+        .old = "if (distance >= 16) {",
+        .new = "if (distance >= 9) {",
+    },
 }
